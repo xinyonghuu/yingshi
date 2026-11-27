@@ -18,7 +18,7 @@ import org.mozilla.javascript.Scriptable;
 import org.mozilla.javascript.ScriptableObject;
 import org.mozilla.javascript.Undefined;
 import org.mozilla.javascript.commonjs.module.Require;
-import org.mozilla.javascript.commonjs.module.StrongCachingModuleScriptProvider;
+import org.mozilla.javascript.commonjs.module.provider.StrongCachingModuleScriptProvider;
 import org.mozilla.javascript.commonjs.module.provider.UrlModuleSourceProvider;
 
 import java.io.ByteArrayOutputStream;
