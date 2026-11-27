@@ -95,10 +95,20 @@
         }
 
         Module.prototype.load = function() {
+            // 原版此处存的是 $.inputParam（全树无此属性 ⇒ 恒 undefined），实际只恢复 $.exports，
+            // $.importParam 会「留在最后一个模块的参数上」。这不是笔误可改的地方：
+            // 合集壳的 hijackLazyRule / setLastChapterRule 里写的是**无参**
+            // $.require('hiker://page/funcTools?rule=…')，funcTools 第 1 行就是
+            // let { QING_TITLE, MY_RULE, isIndex } = $.importParam —— 它靠的正是这份「遗留参数」。
+            // 若改成保存/恢复 $.importParam，无参调用时会被写回 undefined，
+            // funcTools 第 1 行直接 TypeError（2026-11-09 真机：hk#1(eval)#89(Function)#1）。
             let $temp = [$.exports, $.inputParam];
             let referee = this.exports;
             $.exports = this.exports;
-            $.importParam = this.importParam;
+            // 只在确实传了参数时覆盖；无参调用沿用上一发的参数（与官方一致）。
+            if (this.importParam !== void 0) {
+                $.importParam = this.importParam;
+            }
             let type = this.id.split("?")[0];
             if (type.endsWith(".json")) {
                 Module._extensions.json(this);
@@ -109,7 +119,7 @@
                 this.exports = $.exports;
             }
             $.exports = $temp[0];
-            $.importParam = $temp[1];
+            $.inputParam = $temp[1];
         }
 
         function getScript(module) { //处理子页面和js:
@@ -183,6 +193,22 @@
             return false;
         }
 
+        // 判断 importParam 是否「有实际内容」（undefined/null/空串/空对象都算没有）。
+        // 页面模块（hiker://page/…）的模块级变量在加载那一刻就把 importParam 固化了，
+        // 典型：合集类规则 funcTools 的 MY_RULE / QING_TITLE。
+        function hasImportParam(importParam) {
+            if (importParam === void 0 || importParam === null) return false;
+            if (typeof importParam === "string") return importParam.length > 0;
+            if (typeof importParam === "object") {
+                try {
+                    return Object.keys(importParam).length > 0;
+                } catch (e) {
+                    return true;
+                }
+            }
+            return true;
+        }
+
         function require(modulePath, importParam, headers, time) {
             if (typeof headers === "number") {
                 time = headers;
@@ -190,7 +216,22 @@
             }
             modulePath = modulePath || "";
             let absPathname = require.resolve(modulePath);
-            if (Module._cache.has(absPathname)) {
+            // 页面模块（hiker://page/…）＝带参数的函数库。官方 JSEngine.runScript/evalJS 每次都
+            // initStandardObjects 起全新 scope，模块缓存只活一次执行，参数永远不会串；本壳用常驻
+            // scope 保留缓存（站表/会话态在 exports 里，⛔ 不许清 Module._cache），就必须自己管住
+            // 「这个实例对应哪一套参数」：
+            //   · 带参调用：无条件现场重载，并用本次实例覆盖缓存（参数变了就得换实例）；
+            //   · 无参调用：优先吃缓存（拿到的就是最近一次实例），缓存空才加载。
+            // 关键点：带参调用**不许**读缓存。只要这一条成立，缓存里放的是谁都不会
+            // 毒化后续带参调用，于是无参实例照旧可以缓存（dataLoad 这类纯函数库不必反复重载）。
+            // 两个反例都是真机踩出来的：
+            //   ① 带参调用也读缓存 ⇒ 命中早先的无参实例 ⇒ funcTools 第12行
+            //      JSON.parse(base64Decode({})) ⇒ Empty JSON string ⇒ 二级页地址回退域名根；
+            //   ② 带参实例不进缓存 ⇒ 无参调用每次新建、$.importParam 落空 ⇒ funcTools 第1行
+            //      解构 TypeError（hk#1(eval)#89(Function)#1）。
+            let pageModule = absPathname.startsWith("hiker://page/");
+            let paramsFresh = pageModule && hasImportParam(importParam);
+            if (!paramsFresh && Module._cache.has(absPathname)) {
                 return Module._cache.get(absPathname)
                     .exports;
             }
