@@ -3,6 +3,7 @@ package com.github.moyingshi.osc.tv.api.hk;
 import android.app.Activity;
 
 import com.github.catvod.crawler.SpiderDebug;
+import com.github.moyingshi.osc.tv.R;
 import com.github.moyingshi.osc.tv.api.SiteApi;
 import com.github.moyingshi.osc.tv.ui.activity.VideoActivity;
 import com.github.moyingshi.osc.tv.utils.PushParser;
