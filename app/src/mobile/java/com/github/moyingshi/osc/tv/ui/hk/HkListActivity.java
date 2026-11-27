@@ -12,6 +12,7 @@ import androidx.viewbinding.ViewBinding;
 
 import com.github.catvod.crawler.SpiderDebug;
 import com.github.moyingshi.osc.tv.App;
+import com.github.moyingshi.osc.tv.R;
 import com.github.moyingshi.osc.tv.api.hk.HkRule;
 import com.github.moyingshi.osc.tv.databinding.ActivityHkListBinding;
 import com.github.moyingshi.osc.tv.ui.base.BaseActivity;
@@ -30,7 +31,7 @@ import java.security.MessageDigest;
  * 本步只做其最小等价 HkListFragment（列表 + 分页 + 卡片点击分流）。
  * <p>
  * &gt;200KB 的规则走 MD5 + hk_temp_rule.txt（大规则不直接放 Intent extra），
- * 与 APK 的 C1/onCreate 逻辑一致；进程内另有静态 S/R 做同 MD5 的快速交接。
+ * 与 APK 的 C1/onCreate 逻辑一致；进程内另有静态 S/RULE_JSON 做同 MD5 的快速交接。
  */
 public class HkListActivity extends BaseActivity {
 
@@ -40,7 +41,7 @@ public class HkListActivity extends BaseActivity {
 
     /** 静态交接：最近一次大规则的 MD5 与 JSON（进程内快速通道）。 */
     private static String S;
-    private static String R;
+    private static String RULE_JSON;
 
     private ActivityHkListBinding mBinding;
     private HkRule rule;
@@ -63,7 +64,7 @@ public class HkListActivity extends BaseActivity {
         if (json.getBytes(StandardCharsets.UTF_8).length > MAX_INLINE_RULE_BYTES) {
             String md5 = md5(json);
             S = md5;
-            R = json;
+            RULE_JSON = json;
             try {
                 File temp = new File(App.get().getCacheDir(), TEMP_RULE_FILE);
                 try (FileOutputStream out = new FileOutputStream(temp)) {
@@ -117,13 +118,13 @@ public class HkListActivity extends BaseActivity {
         return super.onOptionsItemSelected(item);
     }
 
-    /** onCreate 读规则 JSON：先 "data"，再 "ruleKey"（静态 S/R → hk_temp_rule.txt）。 */
+    /** onCreate 读规则 JSON：先 "data"，再 "ruleKey"（静态 S/RULE_JSON → hk_temp_rule.txt）。 */
     private static String readRuleJson(Intent intent) {
         if (intent == null) return null;
         String data = intent.getStringExtra("data");
         if (!TextUtils.isEmpty(data)) return data;
         String ruleKey = intent.getStringExtra("ruleKey");
-        if (ruleKey != null && ruleKey.equals(S)) return R;
+        if (ruleKey != null && ruleKey.equals(S)) return RULE_JSON;
         if (ruleKey == null) return null;
         try {
             File file = new File(App.get().getCacheDir(), TEMP_RULE_FILE);
