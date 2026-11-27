@@ -4,6 +4,7 @@ import android.os.Build;
 import android.text.TextUtils;
 
 import com.github.moyingshi.osc.tv.App;
+import com.github.moyingshi.osc.tv.api.hk.HkRuleStore;
 import com.github.moyingshi.osc.tv.bean.Site;
 import com.github.catvod.utils.Json;
 import com.github.catvod.utils.Path;
@@ -131,7 +132,7 @@ public class LocalSource {
         return end > start && "密密".equals(site.getName().substring(start + 2, end));
     }
 
-    /** 是不是已废弃的海阔小程序站源（api 或 key 以 hk:// 开头）：小程序功能已删除，这类条目不再加载；只按字符串判断。 */
+    /** 是不是海阔小程序站源（api 或 key 以 hk:// 开头）。第 1 步：settings 里的陈旧 hk:// 条目仍跳过（指向已删引擎）；入口改为内置种子规则，由 getSites() 末尾追加 HkRuleStore.builtinSites()。 */
     private static boolean isMiniapp(Site site) {
         if (site == null) return false;
         String api = site.getApi();
@@ -157,6 +158,9 @@ public class LocalSource {
             if (!showSecret && isSecret(site)) continue;
             result.add(site);
         }
+        // 海阔小程序入口（第 1 步）：内置种子规则以 hk:// 站点追加进来；
+        // settings 里的陈旧 hk:// 条目上面已跳过，不会与之重复。
+        result.addAll(HkRuleStore.builtinSites());
         sites = result;
         return new ArrayList<>(result);
     }
