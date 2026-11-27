@@ -13,6 +13,8 @@ import androidx.viewbinding.ViewBinding;
 import com.github.moyingshi.osc.tv.App;
 import com.github.moyingshi.osc.tv.R;
 import com.github.moyingshi.osc.tv.api.config.VodConfig;
+import com.github.moyingshi.osc.tv.api.hk.HkRule;
+import com.github.moyingshi.osc.tv.api.hk.HkRuleStore;
 import com.github.moyingshi.osc.tv.bean.Config;
 import com.github.moyingshi.osc.tv.bean.Site;
 import com.github.moyingshi.osc.tv.databinding.DialogLocalSourceBinding;
@@ -21,6 +23,7 @@ import com.github.moyingshi.osc.tv.impl.Callback;
 import com.github.moyingshi.osc.tv.theme.WebHtvAlertDialogBuilder;
 import com.github.moyingshi.osc.tv.ui.adapter.LocalSourceAdapter;
 import com.github.moyingshi.osc.tv.ui.custom.CustomTextListener;
+import com.github.moyingshi.osc.tv.ui.hk.HkListActivity;
 import com.github.moyingshi.osc.tv.utils.FileChooser;
 import com.github.moyingshi.osc.tv.utils.LocalSource;
 import com.github.moyingshi.osc.tv.utils.Notify;
@@ -293,6 +296,15 @@ public class LocalSourceDialog extends BaseAlertDialog implements LocalSourceAda
 
     @Override
     public void onItemClick(Site item) {
+        // 海阔小程序入口（第 1 步）：hk:// 站点不走正常 setHome，改开 HkListActivity（与 SiteDialog 一致）。
+        if (item != null && item.getApi() != null && item.getApi().startsWith("hk://")) {
+            HkRule rule = HkRuleStore.load(item.getApi().substring(5));
+            if (rule != null && getActivity() != null) {
+                HkListActivity.start(getActivity(), rule, rule.title());
+                dismiss();
+                return;
+            }
+        }
         VodConfig.get().setHome(item);
         ConfigEvent.vod();
         dismiss();
