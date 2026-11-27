@@ -213,6 +213,8 @@ dependencies {
     implementation libs.quickjs.java
     // B5 Widget.dom 用 jsoup：quickjs 模块的 jsoup 是 implementation，不向 app 传递，故此处显式声明（同一版本 1.22.2）。
     implementation libs.jsoup
+    // 海阔小程序引擎第 1 步：Rhino 解释器跑规则 JS（REPLICATION.md §13.3，版本待核对 §14.13）。
+    implementation libs.rhino
     implementation libs.appcompat
     implementation libs.lifecycle.service
     implementation libs.media
