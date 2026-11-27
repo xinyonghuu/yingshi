@@ -102,6 +102,7 @@ VideoActivity.startDirect(activity, SiteApi.PUSH, PushParser.of(resolvedUrl, tit
 12. 种子规则“海阔测试”的卡片 `pic` 为空（未猜测示例视频的封面地址），列表里图片位显示占位图；不影响点卡解析地址的闭环验证。
 13. 构建修（2026-11-27 17:37）：构建运行 45969479112 报 `HkJsRuntime.java:21: cannot find symbol`——`StrongCachingModuleScriptProvider` 的 import 写错了包（`commonjs.module`，实测在 `commonjs.module.provider`），已改成 provider 包；第 22 行 `UrlModuleSourceProvider` 本就在 provider 包，未动。构建里另一个失败原因（签名 secrets 未配）与本次无关，未碰工作流。
 14. 构建修（2026-11-27 19:15）：构建运行 #2（45983119653）编译失败，两个原因——`HkPlay.java:66` 用了 `R.string.push` 但没 import R；`HkListActivity.java:43` 声明了 `private static String R;`，遮蔽了生成的 R 类，导致第 107 行 `R.id.container` 报错。已修：HkPlay 补 `import com.github.moyingshi.osc.tv.R;`；HkListActivity 静态字段 R 改名 RULE_JSON（三处：声明、赋值、返回，注释同步），并补 R import。
+15. 入口修（2026-11-27 22:16）：真机验收发现，从“实验室 → 本地源”列表点“海阔测试”只 `setHome`，首页标题变成“海阔测试”、内容空白——`LocalSourceDialog.onItemClick` 点任何源都是直接 `setHome`，没有 hk:// 拦截；第 1 步的拦截只写在了 SiteDialog（换源对话框）里，实验室这条路没接。已修：LocalSourceDialog.onItemClick 开头加 hk:// 拦截，与 SiteDialog 一致（`HkRuleStore.load` 取规则，成功则 `HkListActivity.start` 并 dismiss；规则为 null 时落回原有 setHome 行为）。
 
 ## 验证（本地）
 
