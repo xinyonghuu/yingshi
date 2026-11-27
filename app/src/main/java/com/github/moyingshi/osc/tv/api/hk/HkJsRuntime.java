@@ -98,12 +98,15 @@ public class HkJsRuntime {
             "setResult", "getJsPlugin", "getJsLazyPlugin", "getCryptoJS",
             "log", "xlog", "toast", "require", "getRule",
             "getVar", "putVar", "getItem", "setItem", "getMyVar", "putMyVar",
+            "getPublicItem", "setPublicItem", "clearPublicItem",
             "fileExist", "md5", "joinUrl", "buildUrl",
             "sleep", "getPageTitle", "setTitle", "getUrl"));
 
     /**
      * $ fallback 垫片 + method_* 适配对象（x12 bootstrap 的等价实现）。
      * Hikerurl.js 正常加载时 $ 已存在，垫片不生效；method_* 是 Java↔JS 双向桥的函数包装。
+     * storage0 兜底：plugin.js 加载失败时才定义（与 plugin.js 281–347 行同语义，ES5 写法）；
+     * plugin.js 正常加载时 storage0 已存在，守卫跳过。
      */
     private static final String BOOTSTRAP_SHIM =
             "if (typeof $ !== 'function') {"
@@ -115,7 +118,30 @@ public class HkJsRuntime {
                     + "if (typeof method_request !== 'function') { var method_request = function() { return request.apply(null, arguments); }; }"
                     + "if (typeof method_require !== 'function') { var method_require = function(u) { return require(u); }; }"
                     + "if (typeof method_addItemAfter !== 'function') { var method_addItemAfter = function() { return null; }; }"
-                    + "if (typeof method_addItemBefore !== 'function') { var method_addItemBefore = function() { return null; }; }";
+                    + "if (typeof method_addItemBefore !== 'function') { var method_addItemBefore = function() { return null; }; }"
+                    + "if (typeof storage0 === 'undefined') {"
+                    + "  var __hkToJsonObj = function(a) {"
+                    + "    if (!a) { return a; }"
+                    + "    if (typeof a === 'string' && a.charAt(0) === '{' && a.charAt(a.length - 1) === '}') { try { return JSON.parse(a); } catch (e) {} }"
+                    + "    if (typeof a === 'string' && a.charAt(0) === '[' && a.charAt(a.length - 1) === ']') { try { return JSON.parse(a); } catch (e) {} }"
+                    + "    return a;"
+                    + "  };"
+                    + "  var __hkToJsonStr = function(obj) {"
+                    + "    if (obj == null) { obj = ''; }"
+                    + "    if (typeof obj !== 'string') { obj = JSON.stringify(obj); }"
+                    + "    return obj;"
+                    + "  };"
+                    + "  var storage0 = {"
+                    + "    getItem: function(key, defaultVal) { return __hkToJsonObj(getItem(key, __hkToJsonStr(defaultVal))); },"
+                    + "    setItem: function(key, obj) { setItem(key, __hkToJsonStr(obj)); },"
+                    + "    getPublicItem: function(key, defaultVal) { return __hkToJsonObj(getPublicItem(key, __hkToJsonStr(defaultVal))); },"
+                    + "    setPublicItem: function(key, obj) { setPublicItem(key, __hkToJsonStr(obj)); },"
+                    + "    getVar: function(key, defaultVal) { return __hkToJsonObj(getVar(key, __hkToJsonStr(defaultVal))); },"
+                    + "    putVar: function(key, obj) { putVar(key, __hkToJsonStr(obj)); },"
+                    + "    getMyVar: function(key, defaultVal) { return __hkToJsonObj(getMyVar(key, __hkToJsonStr(defaultVal))); },"
+                    + "    putMyVar: function(key, obj) { putMyVar(key, __hkToJsonStr(obj)); }"
+                    + "  };"
+                    + "}";
 
     /** f42.d：当前规则。 */
     private volatile HkRule rule;
@@ -143,6 +169,8 @@ public class HkJsRuntime {
     private final Map<String, Object> myVars = new ConcurrentHashMap<>();
     /** setItem/getItem：第 1 步为运行时内存态（不持久化，持久化是第 2 步）。 */
     private final Map<String, String> items = new ConcurrentHashMap<>();
+    /** setPublicItem/getPublicItem：第 1 步为运行时内存态（不持久化，持久化是第 2 步）。 */
+    private final Map<String, String> publicItems = new ConcurrentHashMap<>();
     /** fetchCache：第 1 步为内存缓存（无 TTL，留待第 2 步）。 */
     private final Map<String, String> fetchCache = new ConcurrentHashMap<>();
     /** 本次求值的 token（f42.Z() 自增）。 */
@@ -331,16 +359,34 @@ public class HkJsRuntime {
                     return doRequire(args);
                 case "getRule":
                     return getRuleJsObject();
-                case "getVar":
-                    return vars.get(argString(args, 0, ""));
+                case "getVar": {
+                    // 与 getItem 同理：键不存在时回第二个参数（默认值）；storage0.getVar 靠它。
+                    Object varVal = vars.get(argString(args, 0, ""));
+                    return varVal == null ? (args.length > 1 ? args[1] : null) : varVal;
+                }
                 case "putVar":
                     // ConcurrentHashMap 不接受 null 值；JS 的 null/undefined 视为删键。
                     putVarValue(vars, argString(args, 0, ""), args.length > 1 ? args[1] : null);
                     return null;
-                case "getItem":
-                    return items.get(argString(args, 0, ""));
+                case "getItem": {
+                    // 键不存在时回第二个参数（默认值），与 getMyVar 一致；storage0.getItem 靠它。
+                    String itemVal = items.get(argString(args, 0, ""));
+                    return itemVal == null ? (args.length > 1 ? args[1] : null) : itemVal;
+                }
                 case "setItem":
                     items.put(argString(args, 0, ""), argString(args, 1, ""));
+                    return null;
+                case "getPublicItem": {
+                    String pubVal = publicItems.get(argString(args, 0, ""));
+                    return pubVal == null ? (args.length > 1 ? args[1] : null) : pubVal;
+                }
+                case "setPublicItem":
+                    publicItems.put(argString(args, 0, ""), argString(args, 1, ""));
+                    return null;
+                case "clearPublicItem":
+                    // 有参清指定键，无参清全部；只清内存态。
+                    if (args.length > 0) publicItems.remove(argString(args, 0, ""));
+                    else publicItems.clear();
                     return null;
                 case "getMyVar":
                     Object my = myVars.get(argString(args, 0, ""));
