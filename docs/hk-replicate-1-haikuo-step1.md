@@ -101,6 +101,7 @@ VideoActivity.startDirect(activity, SiteApi.PUSH, PushParser.of(resolvedUrl, tit
 11. 重读时发现并已修：`evalRuleJs` 必须剥 `js:` 前缀——`js:` 在 ES6 里是标签，`js: let ...` 是 SyntaxError（标签后不能跟词法声明），不剥则 `let` 开头的规则求值必失败；`parseDom` 调用签名不匹配已修。
 12. 种子规则“海阔测试”的卡片 `pic` 为空（未猜测示例视频的封面地址），列表里图片位显示占位图；不影响点卡解析地址的闭环验证。
 13. 构建修（2026-11-27 17:37）：构建运行 45969479112 报 `HkJsRuntime.java:21: cannot find symbol`——`StrongCachingModuleScriptProvider` 的 import 写错了包（`commonjs.module`，实测在 `commonjs.module.provider`），已改成 provider 包；第 22 行 `UrlModuleSourceProvider` 本就在 provider 包，未动。构建里另一个失败原因（签名 secrets 未配）与本次无关，未碰工作流。
+14. 构建修（2026-11-27 19:15）：构建运行 #2（45983119653）编译失败，两个原因——`HkPlay.java:66` 用了 `R.string.push` 但没 import R；`HkListActivity.java:43` 声明了 `private static String R;`，遮蔽了生成的 R 类，导致第 107 行 `R.id.container` 报错。已修：HkPlay 补 `import com.github.moyingshi.osc.tv.R;`；HkListActivity 静态字段 R 改名 RULE_JSON（三处：声明、赋值、返回，注释同步），并补 R import。
 
 ## 验证（本地）
 
