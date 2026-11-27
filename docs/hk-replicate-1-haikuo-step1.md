@@ -100,6 +100,7 @@ VideoActivity.startDirect(activity, SiteApi.PUSH, PushParser.of(resolvedUrl, tit
 10. `h12.k()` 465 行之后的分支未全读，通用分支（POST body 按表单编码）是大体等价实现。
 11. 重读时发现并已修：`evalRuleJs` 必须剥 `js:` 前缀——`js:` 在 ES6 里是标签，`js: let ...` 是 SyntaxError（标签后不能跟词法声明），不剥则 `let` 开头的规则求值必失败；`parseDom` 调用签名不匹配已修。
 12. 种子规则“海阔测试”的卡片 `pic` 为空（未猜测示例视频的封面地址），列表里图片位显示占位图；不影响点卡解析地址的闭环验证。
+13. 构建修（2026-11-27 17:37）：构建运行 45969479112 报 `HkJsRuntime.java:21: cannot find symbol`——`StrongCachingModuleScriptProvider` 的 import 写错了包（`commonjs.module`，实测在 `commonjs.module.provider`），已改成 provider 包；第 22 行 `UrlModuleSourceProvider` 本就在 provider 包，未动。构建里另一个失败原因（签名 secrets 未配）与本次无关，未碰工作流。
 
 ## 验证（本地）
 
