@@ -5,6 +5,8 @@ import android.app.Activity;
 import com.github.catvod.crawler.SpiderDebug;
 import com.github.moyingshi.osc.tv.R;
 import com.github.moyingshi.osc.tv.api.SiteApi;
+import com.github.moyingshi.osc.tv.setting.PlayerSetting;
+import com.github.moyingshi.osc.tv.theme.WebHtvAlertDialogBuilder;
 import com.github.moyingshi.osc.tv.ui.activity.VideoActivity;
 import com.github.moyingshi.osc.tv.utils.PushParser;
 import com.github.moyingshi.osc.tv.utils.ResUtil;
@@ -63,7 +65,37 @@ public final class HkPlay {
         }
         SpiderDebug.log("hk", "play push: key=%s id=%s title=%s url=%s lines=%s index=%d",
                 SiteApi.PUSH, id, title, resolvedUrl, linesJson, lineIndex);
-        VideoActivity.startDirect(activity, SiteApi.PUSH, id, title, pic, "",
+        // TODO DIAGNOSTIC: 定位后删除 —— 播放前先把要播的地址和当前内核弹出来，
+        // 确认进播放器的是不是解析出的原地址、内核是不是用户以为的那个。
+        final String playId = id;
+        Runnable startPlayback = () -> VideoActivity.startDirect(activity, SiteApi.PUSH, playId, title, pic, "",
                 ResUtil.getString(R.string.push), title, resolvedUrl);
+        if (activity.isFinishing() || activity.isDestroyed()) {
+            startPlayback.run();
+            return;
+        }
+        int kernel = PlayerSetting.getActivePlayer();
+        String message = "标题：" + title
+                + "\n线路：" + ResUtil.getString(R.string.push)
+                + "\n地址：" + resolvedUrl
+                + "\n当前内核：" + kernelName(kernel) + "（" + kernel + "）";
+        new WebHtvAlertDialogBuilder(activity)
+                .setTitle("海阔播放诊断")
+                .setMessage(message)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("播放", (dialog, which) -> startPlayback.run())
+                .show();
+    }
+
+    /** 诊断弹窗用的内核名；PlayerSetting 里没有名字映射，这里就地映射。 */
+    private static String kernelName(int kernel) {
+        switch (kernel) {
+            case PlayerSetting.EXO: return "Exo";
+            case PlayerSetting.IJK: return "ijk";
+            case PlayerSetting.SYSTEM: return "系统";
+            case PlayerSetting.MPV: return "mpv";
+            case PlayerSetting.VLC: return "VLC";
+            default: return "未知";
+        }
     }
 }
