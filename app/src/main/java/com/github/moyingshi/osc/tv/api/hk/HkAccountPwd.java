@@ -1,0 +1,41 @@
+package com.github.moyingshi.osc.tv.api.hk;
+
+/**
+ * 官 {@code com.example.hikerview.ui.rules.model.AccountPwd} 的等价模型
+ * （AccountPwd.smali 字段表逐字：account/password 两 String 字段、无参＋
+ * 两参构造、getter/setter 全套）。云仓库（publish）账号的载体。
+ * <p>
+ * 移植自星辰 {@code app/src/main/java/com/fongmi/android/tv/api/hk/HkAccountPwd.java}，
+ * 除包名外与原文一致。yingshi 现状：publishRule 的落点是云剪贴上传（见
+ * {@link HkJsRuntime} 的 publishRule 分支），不走云仓库账号体系——本类先作
+ * 账号载体备着，账号设置页落树后再接存取。
+ */
+public class HkAccountPwd {
+
+    private String account;
+    private String password;
+
+    public HkAccountPwd() {
+    }
+
+    public HkAccountPwd(String account, String password) {
+        this.account = account;
+        this.password = password;
+    }
+
+    public String getAccount() {
+        return account;
+    }
+
+    public void setAccount(String account) {
+        this.account = account;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+}

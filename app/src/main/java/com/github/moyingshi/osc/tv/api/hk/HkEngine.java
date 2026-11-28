@@ -74,6 +74,18 @@ public final class HkEngine {
         return RUNTIMES.get(ruleKey(rule));
     }
 
+    /**
+     * 第 2 步：按标题驱逐运行时缓存（HkRuleManager.clearRuleCache 调）。
+     * 同时清 mtime 与初始化守卫，下次打开该规则时按磁盘文件重建。
+     */
+    public static void evictRule(String title) {
+        if (TextUtils.isEmpty(title)) return;
+        HkJsRuntime runtime = RUNTIMES.remove(title);
+        MTIMES.remove(title);
+        if (runtime != null) INITIALIZED.remove(runtime);
+        SpiderDebug.log("HkJsRuntime", "rule cache evicted: %s", title);
+    }
+
     /** a02.a()：初始化守卫（不在集合中才调 C0()，双重检查防重复初始化）。 */
     public static void ensureInit(HkJsRuntime runtime) throws Exception {
         if (runtime == null || INITIALIZED.contains(runtime)) return;

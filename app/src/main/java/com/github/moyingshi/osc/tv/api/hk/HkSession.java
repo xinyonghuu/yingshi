@@ -16,13 +16,16 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 海阔小程序规则会话，第 1 步最小核。
  * <p>
  * 等价于 APK 的混淆类 n52（1,568 行）中列表/点卡路径用到的部分：
  * URL 白名单、相对地址补齐 a()、懒解析执行器 b()、列表入口 h()。
- * pics://、novel://、webRule:// 三路与 x5 播放器细节是第 2/3 步，本步只记日志。
+ * pics://、novel:// 两路与 x5 播放器细节是第 2/3 步，本步只记日志；
+ * webRule:// 于第 3 步第 1 件接进 {@link HkRouter#play}（web 嗅探链）。
  * <p>
  * 行为依据：REPLICATION.md §6.4 与 n52.java 反编译原文（a/b/z 已逐行核对）。
  */
@@ -56,6 +59,12 @@ public final class HkSession {
         HkRule rule = HkRuleStore.load(title);
         if (rule == null) return null;
         return forRule(rule);
+    }
+
+    /** 第 2 步：按标题驱逐会话缓存（HkRuleManager.clearRuleCache 调）。 */
+    public static void evictRule(String title) {
+        if (TextUtils.isEmpty(title)) return;
+        SESSIONS.remove(title);
     }
 
     public static HkSession forRule(HkRule rule) {
@@ -158,7 +167,9 @@ public final class HkSession {
             if (rest.startsWith("{") && rest.contains("urls")) {
                 MultiLine lines = parseMultiLine(rest);
                 if (lines != null && !lines.urls.isEmpty()) {
-                    cb.onResolved(lines.urls.get(0), lines.toJson(), 0);
+                    // 第 3 步第 3 件：透传 PlayData 对象形原文（不是重发的 JSONArray），
+                    // 分线请求头/subtitle/danmu/lyric 才到得了 HkPlay.play 的 HkPlayData。
+                    cb.onResolved(lines.urls.get(0), rest, 0);
                     return;
                 }
             }
@@ -168,13 +179,29 @@ public final class HkSession {
         if (trimmed.startsWith("{") && trimmed.contains("\"urls\"")) {
             MultiLine lines = parseMultiLine(trimmed);
             if (lines != null && !lines.urls.isEmpty()) {
-                cb.onResolved(lines.urls.get(0), lines.toJson(), 0);
+                // 同上：透传对象形原文。
+                cb.onResolved(lines.urls.get(0), trimmed, 0);
                 return;
             }
         }
         if (trimmed.regionMatches(true, 0, "webRule://", 0, 10)) {
-            SpiderDebug.log("hk", "lazy webRule 未接（第 2/3 步）：%s", ruleTitle());
-            cb.onEmpty();
+            // 第 3 步第 1 件：接进 HkRouter.play（web 嗅探链）——webRule:// 是
+            // 规则指定的"用 webview 嗅探取播放地址"入口；路由器内部按需调
+            // HkWebkitFetcher（第 5 件才有真实现，第 1 件时 resolveWebRule 恒 false）。
+            try {
+                HkPlay out = new HkRouter(rule).play(trimmed);
+                if (out == null || out.isEmpty()) {
+                    cb.onEmpty();
+                    return;
+                }
+                // 第 3 步第 3 件：经 HkPlayData 透传对象形（分线请求头等才保得住），
+                // 单线时仍回 ""（与旧口径一致）。
+                HkPlayData data = HkPlayData.fromPlay(out);
+                cb.onResolved(out.getUrl(0), data.isMultiLine() ? data.toJson() : "", 0);
+            } catch (Throwable e) {
+                SpiderDebug.log("hk", "lazy webRule router failed: %s", e.toString());
+                cb.onEmpty();
+            }
             return;
         }
         if (trimmed.startsWith("pics://")) {
@@ -215,6 +242,64 @@ public final class HkSession {
         }
         SpiderDebug.log("hk", "lazy chain depth=%d rule=%s host=%s", depth + 1, ruleTitle(), target);
         cb.onResolved(target, "", 0);
+    }
+
+    /** 同步解析结果（HkRouter.resolveLazyRule 的同步包装用）。 */
+    public static final class Resolved {
+        public final String url;
+        public final String linesJson;
+        public final int lineIndex;
+        public final boolean empty;
+
+        private Resolved(String url, String linesJson, int lineIndex) {
+            this.url = url == null ? "" : url;
+            this.linesJson = linesJson == null ? "" : linesJson;
+            this.lineIndex = lineIndex;
+            this.empty = TextUtils.isEmpty(this.url);
+        }
+
+        public static Resolved empty() {
+            return new Resolved("", "", 0);
+        }
+    }
+
+    /**
+     * 同步版 lazyParse（第 3 步第 1 件）：把回调式解析包成一次返回，供
+     * HkRouter.resolveLazyRule / HkDetailBridge 的同步装配用。
+     * 当前 lazyParse 全分支同步回调；为防将来有异步分支，用 30 秒 latch
+     * 兜底——超时按空处理，不阻塞调用线程。
+     */
+    public Resolved resolveSync(String url) {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final String[] box = new String[]{"", "", "0"};
+        final boolean[] got = new boolean[]{false};
+        lazyParse(0, new HkLazyCallback() {
+            @Override
+            public void onResolved(String u, String linesJson, int lineIndex) {
+                box[0] = u;
+                box[1] = linesJson;
+                box[2] = String.valueOf(lineIndex);
+                got[0] = true;
+                latch.countDown();
+            }
+
+            @Override
+            public void onEmpty() {
+                latch.countDown();
+            }
+        }, url, "");
+        try {
+            latch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (!got[0]) return Resolved.empty();
+        int idx = 0;
+        try {
+            idx = Integer.parseInt(box[2]);
+        } catch (NumberFormatException ignored) {
+        }
+        return new Resolved(box[0], box[1], idx);
     }
 
     private String evalLazyJs(String js) {

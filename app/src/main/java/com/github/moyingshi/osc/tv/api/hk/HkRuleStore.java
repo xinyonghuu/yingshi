@@ -54,6 +54,16 @@ public final class HkRuleStore {
         return new File(rulesDir(), fileNameFor(title));
     }
 
+    /**
+     * q52.w(title)：规则私有数据目录（require.json / libs/ 的落点，第 2 步）。
+     * APK 是 {@code <规则目录>/data/<P(title)>}，P(title) 不带 ".json"。
+     */
+    public static File ruleDataDir(String title) {
+        String name = fileNameFor(title);
+        if (name.endsWith(".json")) name = name.substring(0, name.length() - ".json".length());
+        return new File(rulesDir(), "data/" + name);
+    }
+
     /** q52.A(title)：读规则 JSON → HkRule；不存在返回 null。 */
     public static HkRule load(String title) {
         if (TextUtils.isEmpty(title)) return null;
@@ -106,6 +116,10 @@ public final class HkRuleStore {
      * assets 文件名本身只是打包用的 ASCII 别名（避免中文文件名进仓库）。
      */
     public static void ensureSeeded() {
+        // $.require 接通补丁（第 2 步第 4 件补件）：顺带把内置 hikerPop 种子写进
+        // filesDir/libs/hikerPop.js（HkHikerPopBridge.ensureSeeded，自带 try/catch
+        // 不抛错）。种子同步已在首次 getSites 时跑，规则求值一定在它之后，时序没问题。
+        HkHikerPopBridge.ensureSeeded();
         try {
             AssetManager assets = App.get().getAssets();
             String[] seeds = assets.list(SEED_ASSETS_DIR);
@@ -167,11 +181,16 @@ public final class HkRuleStore {
     /**
      * 内置站点：供 LocalSource.getSites() 追加。站点 key/api 均为 "hk://&lt;标题&gt;"，
      * 点开后由 SiteDialog 拦截进 HkListActivity（不走正常 setSite）。
+     * <p>
+     * 第 2 步：被禁用的规则（SharedPreferences "hk_rule" 的 enabled_&lt;标题&gt; 为 false）
+     * 不进列表；HkRuleManager 改开关/增删规则时会调 LocalSource.invalidate()，
+     * 下次打开源列表即按新状态重算。
      */
     public static List<Site> builtinSites() {
         ensureSeeded();
         List<Site> sites = new ArrayList<>();
         for (HkRule rule : list()) {
+            if (!HkRuleManager.get().isEnabled(rule.title())) continue;
             Site site = new Site();
             site.setKey("hk://" + rule.title());
             site.setName(rule.title());

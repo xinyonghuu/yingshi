@@ -1,10 +1,16 @@
 package com.github.moyingshi.osc.tv.api.hk;
 
+import android.app.Activity;
+import android.content.Intent;
+import android.net.Uri;
 import android.text.TextUtils;
 
 import com.github.catvod.crawler.SpiderDebug;
 import com.github.moyingshi.osc.tv.App;
+import com.github.moyingshi.osc.tv.theme.WebHtvAlertDialogBuilder;
 import com.github.moyingshi.osc.tv.utils.Notify;
+import com.github.moyingshi.osc.tv.utils.Task;
+import com.google.gson.Gson;
 
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -24,6 +30,7 @@ import org.mozilla.javascript.commonjs.module.provider.UrlModuleSourceProvider;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -99,8 +106,11 @@ public class HkJsRuntime {
             "log", "xlog", "toast", "require", "getRule",
             "getVar", "putVar", "getItem", "setItem", "getMyVar", "putMyVar",
             "getPublicItem", "setPublicItem", "clearPublicItem",
+            "clearItem", "deleteItem", "clearMyVar", "listMyVarKeys",
+            "refresh", "refreshPage",
             "fileExist", "md5", "joinUrl", "buildUrl",
-            "sleep", "getPageTitle", "setTitle", "getUrl"));
+            "sleep", "getPageTitle", "setTitle", "getUrl",
+            "showSelectOptions", "__hkStoreGet", "__hkStoreSet");
 
     /**
      * $ fallback 垫片 + method_* 适配对象（x12 bootstrap 的等价实现）。
@@ -163,14 +173,48 @@ public class HkJsRuntime {
     private volatile String currentDocUrl = "";
     /** 上一次 request 的 HTTP 状态码（getResCode 用）。 */
     private volatile int lastResponseCode;
-    /** k22 case 1/2：作用域内临时变量。 */
+    /** k22 case 1/2：作用域内临时变量（§4.12：不持久化，仍是每运行时一份）。 */
     private final Map<String, Object> vars = new ConcurrentHashMap<>();
-    /** putMyVar/getMyVar：第 1 步为运行时内存态（不持久化，持久化是第 2 步）。 */
-    private final Map<String, Object> myVars = new ConcurrentHashMap<>();
-    /** setItem/getItem：第 1 步为运行时内存态（不持久化，持久化是第 2 步）。 */
-    private final Map<String, String> items = new ConcurrentHashMap<>();
-    /** setPublicItem/getPublicItem：第 1 步为运行时内存态（不持久化，持久化是第 2 步）。 */
-    private final Map<String, String> publicItems = new ConcurrentHashMap<>();
+    /**
+     * putMyVar/getMyVar：第 2 步起持久化。内存表是 {@link HkKvStore} 的共享 static
+     * map（构造时/首次访问时从磁盘读进；键已按 plugin.js §2.2 加
+     * {@code "<标题>@"} 前缀隔离）。内存里留活对象（JS 值原样），落盘时另取字符串形。
+     */
+    private final Map<String, Object> myVars;
+    /** setItem/getItem：第 2 步起持久化（内存表与落盘见 {@link HkKvStore}，全局键）。 */
+    private final Map<String, String> items;
+    /** setPublicItem/getPublicItem：第 2 步起持久化（同上，全局键）。 */
+    private final Map<String, String> publicItems;
+    /**
+     * refreshPage/refresh 监听（第 2 步 extras 第 6 件）：按运行时实例挂一个，
+     * 由列表 Fragment 设置、销毁时清除；dispatch 里收到刷新调用时调它，
+     * 监听自己负责切回主线程重跑列表。未设置时刷新调用是空操作，不抛错。
+     */
+    public interface RefreshListener {
+        void onRefreshPage();
+    }
+
+    private volatile RefreshListener refreshListener;
+    /**
+     * refreshPage/refresh 曾被调用的粘性标记（第 3 步第 1 件）：dispatch 里收到
+     * refreshPage 时置位，HkRouter 的分类切换检测（evalTab / 详情预解析）用它
+     * 判断求值期间是否发生了刷新请求；读完后由消费方用 consumeRefreshRequest()
+     * 取走并清零。监听仍按原样调用，本标记只多记一笔，不改变原有行为。
+     */
+    private volatile boolean refreshRequested;
+    /**
+     * __hkStoreGet/__hkStoreSet：跨作用域对象仓库（REPLICATION.md §4.12，APK 的 i0 map
+     * 的第 2 步等价）。进程内内存态，不持久化；值可能是 NativeFunction 闭包（含 hikerPop
+     * 回调），原样存放；key 用 String.valueOf 归一化（规格书的 f42.h(obj, false)
+     * 归一化细节未核对，见任务文档 §5）。
+     */
+    private final Map<String, Object> hkStore = new ConcurrentHashMap<>();
+    /**
+     * 当前前台 Activity（showSelectOptions 弹窗用）。静态弱引用，各运行时实例共用一个
+     * 持有器；HkListActivity / HkSearchActivity 在 onResume 登记、onPause 清除。
+     * 弱引用 + 仅登记前台 Activity，不持有已销毁的 Activity，不漏 Activity。
+     */
+    private static WeakReference<Activity> currentActivityRef;
     /** fetchCache：第 1 步为内存缓存（无 TTL，留待第 2 步）。 */
     private final Map<String, String> fetchCache = new ConcurrentHashMap<>();
     /** 本次求值的 token（f42.Z() 自增）。 */
@@ -187,6 +231,33 @@ public class HkJsRuntime {
 
     public HkJsRuntime(HkRule rule) {
         this.rule = rule;
+        // KV 三张表取 HkKvStore 的共享内存副本（首次访问时从磁盘读进）；
+        // vars（临时变量）仍是每运行时一份，不进持久化。
+        this.myVars = HkKvStore.myVars();
+        this.items = HkKvStore.items();
+        this.publicItems = HkKvStore.publicItems();
+    }
+
+    /** 第 2 步 extras 第 6 件：挂/换 refreshPage 监听；传 null 即清除。 */
+    public void setRefreshListener(RefreshListener listener) {
+        this.refreshListener = listener;
+    }
+
+    /** 取当前 refreshPage 监听（Fragment 销毁时只清自己的那一个用）。 */
+    public RefreshListener getRefreshListener() {
+        return refreshListener;
+    }
+
+    /** 本次求值周期内是否收到过 refreshPage/refresh 调用（粘性标记）。 */
+    public boolean isRefreshRequested() {
+        return refreshRequested;
+    }
+
+    /** 取走并清零 refreshPage 粘性标记（返回取走前的值）。 */
+    public boolean consumeRefreshRequest() {
+        boolean had = refreshRequested;
+        refreshRequested = false;
+        return had;
     }
 
     public HkRule getRuleObject() {
@@ -373,26 +444,104 @@ public class HkJsRuntime {
                     String itemVal = items.get(argString(args, 0, ""));
                     return itemVal == null ? (args.length > 1 ? args[1] : null) : itemVal;
                 }
-                case "setItem":
-                    items.put(argString(args, 0, ""), argString(args, 1, ""));
+                case "setItem": {
+                    // 先改内存表（与 HkKvStore 共享的同一批对象），再写穿落盘。
+                    String itemKey = argString(args, 0, "");
+                    String itemValue = argString(args, 1, "");
+                    items.put(itemKey, itemValue);
+                    HkKvStore.putItem(itemKey, itemValue);
                     return null;
+                }
+                case "deleteItem": {
+                    // 删指定键（内存 + 磁盘）；键不存在时静默成功。
+                    String deleteKey = argString(args, 0, "");
+                    items.remove(deleteKey);
+                    HkKvStore.removeItem(deleteKey);
+                    return null;
+                }
+                case "clearItem": {
+                    // 有参清指定键（AI 生成器长按菜单的 clearItem("list") 即此形），
+                    // 无参清全部；内存 + 磁盘一起清。
+                    if (args.length > 0) {
+                        String clearKey = argString(args, 0, "");
+                        items.remove(clearKey);
+                        HkKvStore.removeItem(clearKey);
+                    } else {
+                        items.clear();
+                        HkKvStore.clearItems();
+                    }
+                    return null;
+                }
                 case "getPublicItem": {
                     String pubVal = publicItems.get(argString(args, 0, ""));
                     return pubVal == null ? (args.length > 1 ? args[1] : null) : pubVal;
                 }
-                case "setPublicItem":
-                    publicItems.put(argString(args, 0, ""), argString(args, 1, ""));
+                case "setPublicItem": {
+                    String pubKey = argString(args, 0, "");
+                    String pubValue = argString(args, 1, "");
+                    publicItems.put(pubKey, pubValue);
+                    HkKvStore.putPublicItem(pubKey, pubValue);
                     return null;
+                }
                 case "clearPublicItem":
-                    // 有参清指定键，无参清全部；只清内存态。
-                    if (args.length > 0) publicItems.remove(argString(args, 0, ""));
-                    else publicItems.clear();
+                    // 有参清指定键，无参清全部；内存 + 磁盘一起清。
+                    if (args.length > 0) {
+                        String clearPubKey = argString(args, 0, "");
+                        publicItems.remove(clearPubKey);
+                        HkKvStore.removePublicItem(clearPubKey);
+                    } else {
+                        publicItems.clear();
+                        HkKvStore.clearPublicItems();
+                    }
                     return null;
-                case "getMyVar":
-                    Object my = myVars.get(argString(args, 0, ""));
+                case "getMyVar": {
+                    // 键按 plugin.js §2.2 加 "<标题>@" 前缀隔离；不存在回默认值。
+                    Object my = myVars.get(HkKvStore.myVarKey(ruleTitle(), argString(args, 0, "")));
                     return my == null ? (args.length > 1 ? args[1] : null) : my;
-                case "putMyVar":
-                    putVarValue(myVars, argString(args, 0, ""), args.length > 1 ? args[1] : null);
+                }
+                case "putMyVar": {
+                    // 内存留活对象（JS 值原样），落盘取字符串形；null/undefined 视为删键。
+                    String myKey = HkKvStore.myVarKey(ruleTitle(), argString(args, 0, ""));
+                    Object myValue = args.length > 1 ? args[1] : null;
+                    if (myValue == null || myValue == Scriptable.NOT_FOUND || myValue instanceof Undefined) {
+                        myVars.remove(myKey);
+                        HkKvStore.removeMyVar(myKey);
+                    } else {
+                        myVars.put(myKey, myValue);
+                        HkKvStore.putMyVar(myKey, myVarPersistString(myValue));
+                    }
+                    return null;
+                }
+                case "clearMyVar": {
+                    // 有参清当前规则的指定键，无参清当前规则的全部键；不动别的规则的变量。
+                    if (args.length > 0) {
+                        String clearMyKey = HkKvStore.myVarKey(ruleTitle(), argString(args, 0, ""));
+                        myVars.remove(clearMyKey);
+                        HkKvStore.removeMyVar(clearMyKey);
+                    } else {
+                        String prefix = ruleTitle() + "@";
+                        for (String key : new HashSet<>(myVars.keySet())) {
+                            if (key.startsWith(prefix)) myVars.remove(key);
+                        }
+                        HkKvStore.clearMyVarsForTitle(ruleTitle());
+                    }
+                    return null;
+                }
+                case "listMyVarKeys": {
+                    // 只列当前规则的键，去掉 "<标题>@" 前缀后以 NativeArray 返回。
+                    List<String> keys = HkKvStore.listMyVarKeysForTitle(ruleTitle());
+                    return cx.newArray(scope, keys.toArray());
+                }
+                case "refreshPage":
+                case "refresh":
+                    // 第 2 步 extras 第 6 件：真实现——调 Fragment 挂的监听（监听内切主线程
+                    // 重跑 loadPage(1)）；未挂监听时空操作。dispatch 仍在求值线程上，
+                    // 这里只转发，不直接碰 UI。
+                    // 第 3 步第 1 件：同时置 refreshRequested 粘性标记，供 HkRouter
+                    // 的分类切换检测读取（监听仍按原样调用）。
+                    refreshRequested = true;
+                    RefreshListener listener = refreshListener;
+                    if (listener != null) listener.onRefreshPage();
                     return null;
                 case "fileExist":
                     return fileExists(argString(args, 0, ""));
@@ -414,6 +563,24 @@ public class HkJsRuntime {
                     return null;
                 case "getUrl":
                     return currentUrl;
+                case "__hkStoreGet":
+                    // §4.12：跨作用域取对象；key 不存在回 null（不回默认值参数，APK 的
+                    // i0 map 语义就是查无则 null；hikerPop 的 __hpInvokeJs 查无时自行处理）。
+                    return hkStore.get(storeKey(args, 0));
+                case "__hkStoreSet":
+                    // null/undefined 视为删键（ConcurrentHashMap 不接受 null 值，与 putVar 同款）。
+                    putVarValue(hkStore, storeKey(args, 0), args.length > 1 ? args[1] : null);
+                    return null;
+                case "showSelectOptions":
+                    return doShowSelectOptions(args);
+                case "openAppIntent":
+                    return doOpenAppIntent(args);
+                case "publishRule":
+                    return doPublishRule(args);
+                case "fetchCodeByWebView":
+                    return HkWebkitFetcher.fetchCodeByWebView(argString(args, 0, ""), scriptableToMap(args != null && args.length > 1 ? args[1] : null));
+                case "executeWebRule":
+                    return HkWebkitFetcher.executeWebRule(argString(args, 0, ""), argString(args, 1, ""), scriptableToMap(args != null && args.length > 2 ? args[2] : null));
                 default:
                     return null;
             }
@@ -430,6 +597,34 @@ public class HkJsRuntime {
         } else {
             map.put(key, value);
         }
+    }
+
+    /** 当前规则标题（myVars 的 "<标题>@" 前缀用；rule 为空时 ""）。 */
+    private String ruleTitle() {
+        return rule == null ? "" : rule.title();
+    }
+
+    /**
+     * myVars 落盘用的字符串形：字符串原样；数字/布尔 {@code toString}；
+     * JS 对象/数组经 {@link HkItem#jsToJava} 转 Java 结构再 Gson 序列化为 JSON 字符串
+     * （与卡片 extra 的序列化同一路；storage0 取值时对 {@code {…}/[…]} 形自动
+     * {@code JSON.parse}，故经 storage0 读回仍是对象）；函数存源码字符串；其余
+     * {@code Context.toString}。这只是持久化近似：读回的不再是活 JS 对象，
+     * 见任务文档 §7 未验证 1。
+     */
+    private static String myVarPersistString(Object value) {
+        if (value instanceof CharSequence) return value.toString();
+        if (value instanceof Number || value instanceof Boolean) return Context.toString(value);
+        if (value instanceof Scriptable) {
+            try {
+                Object javaValue = HkItem.jsToJava(value);
+                if (javaValue == null) return Context.toString(value);
+                return new Gson().toJson(javaValue);
+            } catch (Throwable ignored) {
+                return Context.toString(value);
+            }
+        }
+        return Context.toString(value);
     }
 
     // ------------------------------------------------------------------
@@ -464,6 +659,25 @@ public class HkJsRuntime {
     // 求值入口：P() / M() / l2() / t2() / j0() / Z()
     // ------------------------------------------------------------------
 
+    /** 详情求值用的 MY_PARAMS（条目 extra，JSON 串或纯文本；原文 HkJsRuntime.setDetailParams 的 myParams 同款）。 */
+    private volatile String myParams = "";
+
+    /** 设置详情求值用的 MY_PARAMS（条目 extra）；下次 evalJs/evalLazy/evalLazyDry 求值时带入作用域。粘性值，下次调用覆盖。 */
+    public void setDetailParams(String extra) {
+        myParams = extra == null ? "" : extra;
+    }
+
+    /**
+     * 选择器单值提取（Java 侧）：对给定 HTML 按选择器链取首个值（@attr/text/html/outerHtml 后缀）。
+     * 第 3 步第 1 件供 HkRouter 的选择器型懒规则与 computeLastChapter 用（doParseDom 的
+     * Java 等价，不经过 JS 分发；js: 字段不由本方法处理，调用方先分流）。
+     */
+    public String evalField(String html, String field, String url) {
+        if (TextUtils.isEmpty(field)) return "";
+        Document doc = Jsoup.parse(html == null ? "" : html, url == null ? "" : url);
+        return extractFirst(selectChain(doc, field));
+    }
+
     /** P()：通用 JS 求值入口（a02.b 的 .js: 求值调它），返回字符串结果。 */
     public String evalJs(String js, String baseUrl) {
         if (TextUtils.isEmpty(js)) return "";
@@ -472,6 +686,7 @@ public class HkJsRuntime {
             if (scope == null) return "";
             Context cx = enterContext();
             try {
+                if (!myParams.isEmpty()) ScriptableObject.putProperty(scope, "MY_PARAMS", myParams);
                 Object result = cx.evaluateString(scope, js, baseUrl == null ? "eval" : baseUrl, 1, null);
                 if (result == null || result instanceof Undefined) return "";
                 return Context.toString(result);
@@ -498,6 +713,72 @@ public class HkJsRuntime {
         String code = js.trim();
         if (code.startsWith("js:")) code = code.substring(3);
         evalJs(code, "rule");
+    }
+
+    /**
+     * evalLazy：懒规则求值（第 3 步第 1 件，参照被删实现 HkJsRuntime.evalLazy）。
+     * 先把求值上下文写进作用域再求值：{@code MY_URL}=懒段产出的页面地址、
+     * {@code MY_POSITION}=点击位置（-1=无位置，如分类 tab）；同时把
+     * {@code currentUrl} 设为 pageUrl（getUrl() 在求值期间读到它）。
+     * <p>
+     * 适配：我们没有被删那套的 getJsLazyPlugin/lazy 插件拼装——懒段求值直接跑
+     * code 本身（与 HkEngine.evalLazyUrl 同口径）；干跑见 {@link #evalLazyDry}
+     * （本方法内自置 dryRun 标记，求值完恢复）。
+     */
+    public String evalLazy(String code, String pageUrl, int position) {
+        if (TextUtils.isEmpty(code)) return "";
+        synchronized (evalLock) {
+            ensureScope();
+            if (scope == null) return "";
+            if (pageUrl != null) currentUrl = pageUrl;
+            Context cx = enterContext();
+            try {
+                ScriptableObject.putProperty(scope, "MY_URL", pageUrl == null ? "" : pageUrl);
+                ScriptableObject.putProperty(scope, "MY_POSITION", position);
+                if (!myParams.isEmpty()) ScriptableObject.putProperty(scope, "MY_PARAMS", myParams);
+                Object result = cx.evaluateString(scope, code, "lazy", 1, null);
+                if (result == null || result instanceof Undefined) return "";
+                return Context.toString(result);
+            } catch (Throwable e) {
+                SpiderDebug.log("HkJsRuntime", "evalLazy failed: %s", e.toString());
+                throw new RuntimeException(e);
+            } finally {
+                Context.exit();
+            }
+        }
+    }
+
+    /**
+     * evalLazyDry：懒规则干跑（第 3 步第 2 件的分类器用）：求值但不产生播放副
+     * 作用——置 {@code dryRun} 全局标记（规则里的 fetch/网络调用在干跑期间
+     * 应被跳过，见 HkEpisodeDryClassifier 的约定），求值完恢复。
+     * 返回求值结果字符串；失败返回 ""。
+     */
+    public String evalLazyDry(String code, String pageUrl, int position) {
+        if (TextUtils.isEmpty(code)) return "";
+        synchronized (evalLock) {
+            ensureScope();
+            if (scope == null) return "";
+            if (pageUrl != null) currentUrl = pageUrl;
+            Context cx = enterContext();
+            try {
+                ScriptableObject.putProperty(scope, "MY_URL", pageUrl == null ? "" : pageUrl);
+                ScriptableObject.putProperty(scope, "MY_POSITION", position);
+                ScriptableObject.putProperty(scope, "dryRun", true);
+                if (!myParams.isEmpty()) ScriptableObject.putProperty(scope, "MY_PARAMS", myParams);
+                Object result = cx.evaluateString(scope, code, "lazyDry", 1, null);
+                if (result == null || result instanceof Undefined) return "";
+                return Context.toString(result);
+            } catch (Throwable e) {
+                return "";
+            } finally {
+                try {
+                    ScriptableObject.putProperty(scope, "dryRun", false);
+                } catch (Throwable ignored) {
+                }
+                Context.exit();
+            }
+        }
     }
 
     /** l2(url)：取数并准备文档（x12 列表求值前调）。hiker://empty 不取数，给空文档。 */
@@ -589,10 +870,15 @@ public class HkJsRuntime {
     /**
      * m()：主请求执行器。request(url[, options])，options 为 JS 对象
      * {method, headers, body, timeout}；返回响应体字符串，失败记日志返回 ""。
+     * hiker:// / file:// 内置协议先走 readInternalUrl（与 doFetch 同款一行，
+     * 不能处理的回 null 再走 OkHttp），所以 Hikerurl.js 的 getScript 经 request()
+     * 取 {@code hiker://files/libs/hikerPop.js} 时拿到的是种子文件内容而不是空串。
      */
     private Object doRequest(Object[] args) {
         String url = argString(args, 0, "");
         if (TextUtils.isEmpty(url)) return "";
+        String internal = readInternalUrl(url);
+        if (internal != null) return internal;
         String method = "GET";
         Map<String, String> headers = new HashMap<>();
         String body = null;
@@ -689,9 +975,11 @@ public class HkJsRuntime {
     }
 
     /**
-     * b22 code 12：require / 动态加载 JS（第 1 步简化分流）。
-     * hikerPop 走内置实现（第 2 步的 HkHikerPopBridge），本步记日志返回 ""；
-     * hiker://files/libs/ 与 hiker://assets/ 读文本；http(s) 取数；其余读文件。
+     * b22 code 12：require / 动态加载 JS（第 2 步第 4 件接内置 hikerPop）。
+     * hikerPop.js 直返 {@link HkHikerPopBridge} 的内置实现（返回 JS 文本，调用方
+     * eval——APK 的 case 12 同样只返回字面量文本，不在 Java 侧 eval；见
+     * HkHikerPopBridge 上的 (a)(b) 两项核实结论）；hiker://files/libs/ 先读文本，
+     * 命中官方原版三标记时丢弃原版改返内置实现；其余分支原样不动。
      */
     private Object doRequire(Object[] args) {
         String url = argString(args, 0, "");
@@ -701,10 +989,18 @@ public class HkJsRuntime {
         int hash = url.indexOf('#');
         if (hash >= 0) url = url.substring(0, hash);
         if (url.endsWith("hikerPop.js") || "hikerPop.js".equals(url)) {
-            SpiderDebug.log("HkJsRuntime", "hikerPop -> builtin（第 2 步接宿主桥）：%s", url);
-            return "";
+            SpiderDebug.log("HkJsRuntime", "hikerPop -> builtin src=%s", url);
+            return HkHikerPopBridge.builtinSource(this);
         }
-        if (url.startsWith("hiker://files/libs/") || url.startsWith("hiker://assets/")) {
+        if (url.startsWith("hiker://files/libs/")) {
+            String text = readInternalUrl(url);
+            if (HkHikerPopBridge.isOfficialOriginal(text)) {
+                SpiderDebug.log("HkJsRuntime", "hikerPop -> builtin (lib cache) len=%d", text.length());
+                return HkHikerPopBridge.builtinSource(this);
+            }
+            return text == null ? "" : text;
+        }
+        if (url.startsWith("hiker://assets/")) {
             String text = readInternalUrl(url);
             return text == null ? "" : text;
         }
@@ -1043,6 +1339,181 @@ public class HkJsRuntime {
     }
 
     // ------------------------------------------------------------------
+    // 当前 Activity 持有器 + showSelectOptions 原生弹窗（第 2 步第 5 件）
+    // ------------------------------------------------------------------
+
+    /** HkListActivity / HkSearchActivity 在 onResume 登记自己为当前 Activity。 */
+    public static void setCurrentActivity(Activity activity) {
+        currentActivityRef = activity == null ? null : new WeakReference<>(activity);
+    }
+
+    /**
+     * onPause 清除登记；只有持有者正是这个 Activity 时才清，避免后一个 Activity
+     * 已登记、而前一个 Activity 的 onPause 把它误清掉（Activity 切换时序）。
+     */
+    public static void clearCurrentActivity(Activity activity) {
+        if (activity == null || currentActivityRef == null) return;
+        if (currentActivityRef.get() == activity) currentActivityRef = null;
+    }
+
+    /** 取当前 Activity：无登记、已被回收、或正在结束/已销毁时一律回 null（调用方不弹不闪退）。 */
+    private static Activity getCurrentActivity() {
+        if (currentActivityRef == null) return null;
+        Activity activity = currentActivityRef.get();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return null;
+        return activity;
+    }
+
+    /**
+     * k22 case 0 showSelectOptions（REPLICATION.md §4.5）：入参 Map
+     * {js, options[], title, selectedIndex} → ez3.Q 弹原生选择列表。
+     * <p>
+     * 本实现：WebHtvAlertDialogBuilder（应用唯一的 Material 弹窗构造点，主题已绑定）
+     * + setItems 列表，点一项即选中并关闭（与 APK 的 ez3.Q 点选即确认一致）；
+     * selectedIndex 只作初始高亮参考，setItems 不支持高亮故忽略（已解析并夹取到合法范围，
+     * 仅留档；见任务文档 §5 未验证 2）。
+     * <p>
+     * dispatch 本身立即返回 null，不阻塞规则求值线程；选中结果走 replayJs 异步回放。
+     * 入参容错：arg0 不是对象、js 为空、options 为空时直接返回 null 并记日志，不抛错。
+     */
+    private Object doShowSelectOptions(Object[] args) {
+        if (args == null || args.length == 0 || !(args[0] instanceof Scriptable)) {
+            SpiderDebug.log("HkJsRuntime", "showSelectOptions 入参不是对象，忽略");
+            return null;
+        }
+        Scriptable opts = (Scriptable) args[0];
+        String js = argJsString(opts, "js", "");
+        String title = argJsString(opts, "title", "");
+        // selectedIndex 缺省默认 0（首项）；越界夹取到合法范围；setItems 不用它做高亮。
+        int selectedIndex = (int) argJsLong(opts, "selectedIndex", 0);
+        List<String> options = new ArrayList<>();
+        Object rawOptions = ScriptableObject.getProperty(opts, "options");
+        if (rawOptions instanceof NativeArray) {
+            NativeArray arr = (NativeArray) rawOptions;
+            for (int i = 0; i < arr.getLength(); i++) {
+                Object el = arr.get(i, arr);
+                options.add(el == null || el == Scriptable.NOT_FOUND || el instanceof Undefined
+                        ? "" : Context.toString(el));
+            }
+        } else if (rawOptions instanceof Scriptable) {
+            // 类数组对象：按 length 读下标（规则手写 {0: 'a', 1: 'b', length: 2} 时兜底）。
+            Scriptable arrayLike = (Scriptable) rawOptions;
+            long len = argJsLong(arrayLike, "length", 0);
+            for (int i = 0; i < len; i++) {
+                Object el = ScriptableObject.getProperty(arrayLike, i);
+                options.add(el == null || el == Scriptable.NOT_FOUND || el instanceof Undefined
+                        ? "" : Context.toString(el));
+            }
+        }
+        if (TextUtils.isEmpty(js) || options.isEmpty()) {
+            SpiderDebug.log("HkJsRuntime", "showSelectOptions 入参不完整（js 为空或 options 为空），忽略");
+            return null;
+        }
+        if (selectedIndex < 0) selectedIndex = 0;
+        if (selectedIndex >= options.size()) selectedIndex = options.size() - 1;
+        Activity activity = getCurrentActivity();
+        if (activity == null) {
+            SpiderDebug.log("HkJsRuntime", "showSelectOptions 无可用 Activity，忽略（title=%s）", title);
+            return null;
+        }
+        final String[] items = options.toArray(new String[0]);
+        final String dialogTitle = title;
+        final String replayCode = js;
+        activity.runOnUiThread(() -> {
+            if (activity.isFinishing() || activity.isDestroyed()) return;
+            new WebHtvAlertDialogBuilder(activity)
+                    .setTitle(dialogTitle)
+                    .setItems(items, (dialog, which) -> {
+                        if (which >= 0 && which < items.length) {
+                            replayJs(replayCode, items[which], which);
+                        }
+                    })
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show();
+        });
+        return null;
+    }
+
+    /**
+     * showSelectOptions 选中后的回放（§4.5：选中后在页面引擎里按 (input, MY_INDEX) 回放 js）。
+     * <p>
+     * 双通道：先在作用域里置 {@code input}（选中值字符串）与 {@code MY_INDEX}（选中下标）
+     * 两个全局变量——照顾像 AI 生成器 onChange 那种引用自由变量 input 的箭头函数；
+     * 再求值 js：js 是函数源码时以 {@code (<js>)(<input 的 JSON 字符串>, <i>)} 形式调用，
+     * 否则直接当代码 eval（如 hikerPop 的 {@code __hpInvokeJs(id)} 调用表达式）。
+     * 两种都 best-effort，失败只记日志。
+     * <p>
+     * 回放一律走 Task 后台线程，绝不在 UI 线程求值 JS；并在 evalLock 下进 Context
+     * （与 evalJs/evalRule 同一把串行锁，Rhino scope 不支持并发求值）。
+     * 注意：回放只在用户点选后触发，此时原求值已返回、evalLock 已释放，故回放线程取锁不会死锁。
+     */
+    public void replayJs(String js, String input, int index) {
+        if (TextUtils.isEmpty(js)) return;
+        final String code = js;
+        final String value = input == null ? "" : input;
+        final int idx = index;
+        Task.execute(() -> {
+            synchronized (evalLock) {
+                ensureScope();
+                if (scope == null) return;
+                Context cx = enterContext();
+                try {
+                    ScriptableObject.putProperty(scope, "input", value);
+                    ScriptableObject.putProperty(scope, "MY_INDEX", idx);
+                    if (isFunctionSource(code)) {
+                        cx.evaluateString(scope,
+                                "(" + code + ")(" + toJsonString(value) + ", " + idx + ");",
+                                "showSelectOptions", 1, null);
+                    } else {
+                        cx.evaluateString(scope, code, "showSelectOptions", 1, null);
+                    }
+                } catch (Throwable e) {
+                    SpiderDebug.log("HkJsRuntime", "showSelectOptions 回放失败: %s", e.toString());
+                } finally {
+                    Context.exit();
+                }
+            }
+        });
+    }
+
+    /** 函数源码判定：function 开头，或箭头函数（(a, b) => … / a => …）；其余当代码直接 eval。 */
+    private static boolean isFunctionSource(String code) {
+        String t = code.trim();
+        if (t.startsWith("function")) return true;
+        return t.matches("(?s)^\\(?[\\w\\s,$]*\\)?\\s*=>.*");
+    }
+
+    /** 最小 JSON 字符串转义（回放调用形时把 input 值拼进代码用；不引 org.json，避免新依赖）。 */
+    private static String toJsonString(String s) {
+        if (s == null) return "\"\"";
+        StringBuilder sb = new StringBuilder(s.length() + 2);
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                case '\b': sb.append("\\b"); break;
+                case '\f': sb.append("\\f"); break;
+                default:
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+                    else sb.append(c);
+                    break;
+            }
+        }
+        sb.append('"');
+        return sb.toString();
+    }
+
+    /** __hkStoreGet/Set 的 key 归一化：最简单的字符串化（§4.12 的 f42.h(obj, false) 细节未核对）。 */
+    private String storeKey(Object[] args, int i) {
+        return argString(args, i, "");
+    }
+
+    // ------------------------------------------------------------------
     // JS 参数转换小工具
     // ------------------------------------------------------------------
 
@@ -1091,5 +1562,135 @@ public class HkJsRuntime {
             map.put((String) id, Context.toString(v));
         }
         return map;
+    }
+
+    /**
+     * Rhino JS 对象 → Java Map（原始值：String/Number/Boolean/Scriptable；
+     * 跳过函数与未定义）。与 {@link #argMap} 的区别：不字符串化，保留类型，
+     * 供 openAppIntent 的 param（按值类型 putExtra）与 fetchCodeByWebView
+     * 的 options 用。参照坑（见 HkWebkitFetcher）：Rhino 的 JS 对象是
+     * Scriptable 不是 java.util.Map，instanceof Map 恒 false，必须经此转换。
+     */
+    private Map<String, Object> scriptableToMap(Object arg) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        if (!(arg instanceof Scriptable)) return map;
+        Scriptable obj = (Scriptable) arg;
+        for (Object id : obj.getIds()) {
+            if (!(id instanceof String)) continue;
+            Object v = ScriptableObject.getProperty(obj, (String) id);
+            if (v == null || v == Scriptable.NOT_FOUND || v instanceof Undefined) continue;
+            if (v instanceof org.mozilla.javascript.NativeFunction) continue;
+            map.put((String) id, v);
+        }
+        return map;
+    }
+
+    // ------------------------------------------------------------------
+    // openAppIntent / publishRule（第 3 步第 4 件）
+    // ------------------------------------------------------------------
+
+    /**
+     * openAppIntent(p, a, param, ruleTitleKey)：打开第三方应用的指定 Activity。
+     * 移植自参照 openAppIntent 全形（见 HkAuthManager 类头注的官姿态）：
+     * <ul>
+     * <li>ruleTitle 为空 → 直接回 Boolean.FALSE，不做任何检查；</li>
+     * <li>p/a 只能是字符串：非字符串（数字/对象）参照抛 JS 异常「参数类型只能是
+     * 字符串」——我方 dispatch 统一吞异常回 null，抛不到规则里，故此处回
+     * FALSE 并记日志（与参照差一档，见注）；</li>
+     * <li>action 恒 VIEW、flags 恒 0x10008000、component = 包名 + 类名；</li>
+     * <li>先查装机（未装回 FALSE），再消费 param；param 仅 JSONObject 形有效，
+     * 逐键 putExtra（intentData → setData；Integer/Double/Boolean 按类型，
+     * 其余转字符串）；</li>
+     * <li>整段过 HkAuthManager.checkOpenAppIntent 的每回确认 + 1 秒频控门，
+     * 未确认/频控未过回 FALSE；启动异常 toast「出错：」+ 异常信息，回 FALSE；</li>
+     * <li>返回值是真 Boolean（不是字符串 "false"）。</li>
+     * </ul>
+     */
+    private Boolean doOpenAppIntent(Object[] args) {
+        String title = ruleTitle();
+        if (title.isEmpty()) return Boolean.FALSE;
+        Object pArg = args != null && args.length > 0 ? args[0] : null;
+        Object aArg = args != null && args.length > 1 ? args[1] : null;
+        if ((pArg != null && !(pArg instanceof String) && pArg != Scriptable.NOT_FOUND && !(pArg instanceof Undefined))
+                || (aArg != null && !(aArg instanceof String) && aArg != Scriptable.NOT_FOUND && !(aArg instanceof Undefined))) {
+            SpiderDebug.log("HkJsRuntime", "openAppIntent 参数类型只能是字符串");
+            return Boolean.FALSE;
+        }
+        String pkg = argString(args, 0, "");
+        String cls = argString(args, 1, "");
+        if (pkg.isEmpty() || cls.isEmpty()) return Boolean.FALSE;
+        Object param = args != null && args.length > 2 ? args[2] : null;
+        final boolean[] result = {false};
+        boolean allowed = HkAuthManager.checkOpenAppIntent(title, pkg, () -> {
+            try {
+                if (!isAppInstalled(pkg)) {
+                    Notify.show("找不到对应的软件，请确认已安装");
+                    return;
+                }
+                Intent intent = new Intent(Intent.ACTION_VIEW);
+                intent.addFlags(0x10008000);
+                Map<String, Object> extras = scriptableToMap(param);
+                for (Map.Entry<String, Object> e : extras.entrySet()) {
+                    String k = e.getKey();
+                    Object v = e.getValue();
+                    if ("intentData".equals(k)) {
+                        intent.setData(Uri.parse(Context.toString(v)));
+                    } else if (v instanceof Integer) {
+                        intent.putExtra(k, (Integer) v);
+                    } else if (v instanceof Double) {
+                        intent.putExtra(k, (Double) v);
+                    } else if (v instanceof Boolean) {
+                        intent.putExtra(k, (Boolean) v);
+                    } else if (v instanceof Number) {
+                        intent.putExtra(k, ((Number) v).doubleValue());
+                    } else {
+                        intent.putExtra(k, Context.toString(v));
+                    }
+                }
+                intent.setClassName(pkg, cls);
+                App.get().startActivity(intent);
+                result[0] = true;
+            } catch (Throwable e) {
+                Notify.show("出错：" + e.getMessage());
+                SpiderDebug.log("HkJsRuntime", "openAppIntent failed: %s", e.toString());
+            }
+        });
+        return allowed && result[0] ? Boolean.TRUE : Boolean.FALSE;
+    }
+
+    private boolean isAppInstalled(String pkg) {
+        try {
+            App.get().getPackageManager().getPackageInfo(pkg, 0);
+            return true;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    /**
+     * publishRule()：把当前规则发布为云口令（分享给别人导入）。
+     * 参照的落点是云仓库提交（HkPublishHelper，整套账号/提交/JS 评测子系统，
+     * yingshi 没有，不照搬）——且参照自己的 publishRule 也只弹确认、上传动作
+     * 记名未落（官生态后端，星辰无此服务）；我方落点是云剪贴上传：
+     * 先过 HkAuthManager.checkAuth 持久授权门，通过后把当前规则 JSON 经
+     * HkCloudClip 上传（默认云 6 pasteme，其 {@code 云6oooole/xxxxxx/{path}}
+     * 码可直接被我方 resolveCloudPassword 导入）；成功回分享码，失败回 ""。
+     * 规则为空时回 ""。
+     */
+    private String doPublishRule(Object[] args) {
+        String title = ruleTitle();
+        if (title.isEmpty() || rule == null) return "";
+        final String[] result = {""};
+        boolean allowed = HkAuthManager.checkAuth(title, "publishRule",
+                "将规则「" + title + "」发布为云口令（上传到云剪贴板，供他人导入）", () -> {
+                    try {
+                        String json = rule.toJson();
+                        result[0] = HkCloudClip.upload(json, 6);
+                    } catch (Throwable e) {
+                        SpiderDebug.log("HkJsRuntime", "publishRule upload failed: %s", e.toString());
+                        result[0] = "";
+                    }
+                });
+        return allowed ? result[0] : "";
     }
 }
