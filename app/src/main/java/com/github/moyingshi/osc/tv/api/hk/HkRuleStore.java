@@ -95,8 +95,13 @@ public final class HkRuleStore {
     }
 
     /**
-     * 内置种子：首次使用时把 assets/hk/rules/*.json 复制到规则目录（已存在的不覆盖，
-     * 用户改过的规则不被种子冲掉）。
+     * 内置种子：把 assets/hk/rules/*.json 同步到规则目录。
+     * <p>
+     * 目标文件不存在 → 直接复制；已存在但内容与种子不一致 → 用种子覆盖刷新。
+     * 第 1 步没有应用内改规则的入口，文件与种子不一致只可能来自应用更新换了新
+     * 种子，必须刷新——否则旧规则（比如已死的视频地址）永远播不了。
+     * 内容相同则跳过，不动文件（mtime 不变，HkEngine 的 mtime 缓存也不受影响）。
+     * <p>
      * 目标文件名按规则标题生成（fileNameFor(title)），与 load(title) 的查找一致；
      * assets 文件名本身只是打包用的 ASCII 别名（避免中文文件名进仓库）。
      */
@@ -112,11 +117,24 @@ public final class HkRuleStore {
                     HkRule seed = HkRule.fromJson(json);
                     File target = seed == null || TextUtils.isEmpty(seed.title())
                             ? new File(rulesDir(), name) : ruleFile(seed.title());
-                    if (target.exists()) continue;
+                    boolean existed = target.exists();
+                    if (existed) {
+                        String current = null;
+                        try {
+                            current = readFile(target);
+                        } catch (Throwable ignored) {
+                            // 读不出旧文件就按不一致处理，下面覆盖写；写失败再由外层 catch 记日志。
+                        }
+                        if (json.equals(current)) continue;
+                    }
                     try (OutputStream out = new FileOutputStream(target)) {
                         out.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     }
-                    SpiderDebug.log("hk", "seed rule copied: %s -> %s", name, target.getName());
+                    if (existed) {
+                        SpiderDebug.log("hk", "seed rule refreshed: %s", target.getName());
+                    } else {
+                        SpiderDebug.log("hk", "seed rule copied: %s -> %s", name, target.getName());
+                    }
                 } catch (Throwable e) {
                     SpiderDebug.log("hk", "seed rule %s failed: %s", name, e.toString());
                 }
