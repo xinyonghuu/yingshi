@@ -12,6 +12,8 @@ import androidx.viewbinding.ViewBinding;
 import com.github.moyingshi.osc.tv.R;
 import com.github.moyingshi.osc.tv.bean.AiConfig;
 import com.github.moyingshi.osc.tv.databinding.FragmentSettingAiBinding;
+import com.github.moyingshi.osc.tv.module.ModuleDefinition;
+import com.github.moyingshi.osc.tv.module.ModuleManager;
 import com.github.moyingshi.osc.tv.service.RecommendationFeedbackStore;
 import com.github.moyingshi.osc.tv.setting.Setting;
 import com.github.moyingshi.osc.tv.subtitle.RealtimeSubtitleController;
@@ -54,15 +56,37 @@ public class SettingAiFragment extends BaseFragment {
         mBinding.aiRecommendation.setOnClickListener(this::setAiRecommendation);
         mBinding.personalRecommendation.setOnClickListener(this::setPersonalRecommendation);
         mBinding.recommendationFeedback.setOnClickListener(this::manageRecommendationFeedback);
+        mBinding.aiHomeRecommend.setOnClickListener(v -> toggleAiFeature(mBinding.aiHomeRecommendText, Setting.isAiHomeRecommend(), Setting::putAiHomeRecommend));
+        mBinding.aiDiceReason.setOnClickListener(v -> toggleAiFeature(mBinding.aiDiceReasonText, Setting.isAiDiceReason(), Setting::putAiDiceReason));
+        mBinding.aiViewingReport.setOnClickListener(v -> toggleAiFeature(mBinding.aiViewingReportText, Setting.isAiViewingReport(), Setting::putAiViewingReport));
+        mBinding.aiSearchSuggest.setOnClickListener(v -> toggleAiFeature(mBinding.aiSearchSuggestText, Setting.isAiSearchSuggest(), Setting::putAiSearchSuggest));
+        mBinding.aiSubtitleTranslate.setOnClickListener(v -> toggleAiFeature(mBinding.aiSubtitleTranslateText, Setting.isAiSubtitleTranslate(), Setting::putAiSubtitleTranslate));
         mBinding.subtitleRealtimeModel.setOnClickListener(this::onRealtimeModel);
         mBinding.subtitleAiMaxConcurrency.setOnClickListener(this::onSubtitleAiMaxConcurrency);
         mBinding.subtitleAiChunkCount.setOnClickListener(this::onSubtitleAiChunkCount);
     }
 
+    /** P0 功能单独开关（默认关）：点一行切换开/关，只改开关本身，不碰总开关与配置。 */
+    private void toggleAiFeature(com.google.android.material.textview.MaterialTextView text, boolean current, java.util.function.Consumer<Boolean> setter) {
+        setter.accept(!current);
+        text.setText(getSwitch(!current));
+    }
+
     private void setText() {
         if (mBinding == null) return;
+        // 实时字幕模块开关关了：实时字幕模型行与 AI 翻译相关行隐藏（AI 翻译本身走云端，
+        // 与 Sherpa 无关，这里按“关就隐藏”一并收起，开关值保留、功能不受影响）。
+        boolean sherpaEnabled = ModuleManager.getInstance(requireContext())
+                .isEnabled(ModuleDefinition.SHERPA.id);
+        mBinding.subtitleRealtimeModel.setVisibility(sherpaEnabled ? View.VISIBLE : View.GONE);
+        mBinding.aiSubtitleTranslate.setVisibility(sherpaEnabled ? View.VISIBLE : View.GONE);
         mBinding.aiRecommendationText.setText(getAiRecommendationText());
         mBinding.personalRecommendationText.setText(getSwitch(Setting.isPersonalRecommendation()));
+        mBinding.aiHomeRecommendText.setText(getSwitch(Setting.isAiHomeRecommend()));
+        mBinding.aiDiceReasonText.setText(getSwitch(Setting.isAiDiceReason()));
+        mBinding.aiViewingReportText.setText(getSwitch(Setting.isAiViewingReport()));
+        mBinding.aiSearchSuggestText.setText(getSwitch(Setting.isAiSearchSuggest()));
+        mBinding.aiSubtitleTranslateText.setText(getSwitch(Setting.isAiSubtitleTranslate()));
         int feedbackCount = RecommendationFeedbackStore.size();
         mBinding.recommendationFeedbackText.setText(feedbackCount == 0
                 ? getString(R.string.setting_recommendation_feedback_empty)
@@ -174,7 +198,8 @@ public class SettingAiFragment extends BaseFragment {
     }
 
     private void setAiSubtitleSettings() {
-        boolean visible = Setting.isAiConfigReady();
+        boolean visible = Setting.isAiConfigReady()
+                && ModuleManager.getInstance(requireContext()).isEnabled(ModuleDefinition.SHERPA.id);
         mBinding.subtitleAiSettings.setVisibility(visible ? View.VISIBLE : View.GONE);
         mBinding.subtitleAiMaxConcurrencyText.setText(String.valueOf(Setting.getSubtitleAiMaxConcurrency()));
         mBinding.subtitleAiChunkCountText.setText(String.valueOf(Setting.getSubtitleAiChunkCount()));
