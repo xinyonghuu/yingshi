@@ -3481,7 +3481,16 @@ private final Task.Scope mPersonalRecommendationTasks = new Task.Scope(Task.reco
         mAppliedPlayerResult = result;
         mQualityAdapter.addAll(result);
         mQualityAdapter.setPosition(mQualityAdapter.getPosition());
-        setUseParse(result.shouldUseParse());
+        // 推送直链不走解析：海阔给出的地址已是可直接播的 MP4，解析服务只会把它弄坏
+        // （解析接口收到直链会返回空或报错，播放器就一直转圈）。非视频格式的推送地址
+        // 仍走原有逻辑。注意 needParse() 是另一道独立开关（见 PlaybackActivity
+        // startPlayer 的 result.needParse() || useParse）：推送直链在 pushPlayer 里
+        // parse=0、jx=0，needParse() 为 false，这里 setUseParse(false) 才能保证直接播。
+        String realUrl = result.getRealUrl();
+        boolean pushDirect = SiteApi.PUSH.equals(getKey())
+                && realUrl != null && !realUrl.isEmpty()
+                && Sniffer.isVideoFormat(realUrl);
+        setUseParse(pushDirect ? false : result.shouldUseParse());
         mBinding.swipeLayout.setRefreshing(false);
         setQualityVisible(result.getUrl().isMulti());
         if (result.hasArtwork() && !shouldKeepPushArtwork()) setArtwork(result.getArtwork());
