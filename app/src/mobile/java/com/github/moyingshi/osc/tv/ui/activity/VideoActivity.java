@@ -5697,7 +5697,7 @@ private final Task.Scope mPersonalRecommendationTasks = new Task.Scope(Task.reco
         items[kernel.length] = getString(R.string.player_kernel_external);
         new WebHtvAlertDialogBuilder(this).setItems(items, (dialog, index) -> {
             if (index < kernel.length) {
-                int which = PlayerSetting.kernelAt(index);
+                int which = PlayerSetting.enabledKernelAt(index);
                 ModuleDefinition module = PlayerSetting.moduleForPlayer(which);
                 if (module != null && !PlayerSetting.isPlayerAvailable(which)) {
                     ModulePrompt.showMissingModule(this, module);
@@ -8460,7 +8460,7 @@ private final Task.Scope mPersonalRecommendationTasks = new Task.Scope(Task.reco
 
     @Override
     public void onSubtitleClick() {
-        SubtitleDialog.create().view(mBinding.exo.getSubtitleView()).player(player()).search(() -> SubtitleManualSearchDialog.show(this, subtitlePlaybackSession, this)).show(this);
+        SubtitleDialog.create().view(mBinding.exo.getSubtitleView()).player(player()).search(() -> SubtitleManualSearchDialog.show(this, subtitlePlaybackSession, this)).translate(() -> SubtitleManualSearchDialog.translateCurrent(this, subtitlePlaybackSession, this)).show(this);
         hideControl();
     }
 
