@@ -799,3 +799,9 @@ Hikerurl.js（APK 原样复制的资产），没碰裸 require 的 doRequire 接
 3. 需要 JS 渲染的页面抓一次：找一条 webRule:// 或 fetchCodeByWebView 的规则，抓一次渲染后源码/执行结果，确认有内容回（超时 30 秒封顶、切后台不残留 WebView——切一次后台再回前台，抓取应正常结束或超时收口）。
 4. 敏感 API 弹窗：调 openAppIntent 的规则点一次（应每回确认、1 秒内连点第二次直接拒绝），调 publishRule 的规则点一次（首次弹窗授权、授权后不再问、回分享码）。
 5. 回归：单地址直链卡（海阔测试三张）点一次即播；AI 生成器列表与输入框、KV 持久化、种子刷新、#8 setPlayer 强制直接播均不受影响；TV/leanback、品牌、包名未动。
+
+## 构建 #10 编译失败修复（item 23）
+
+- 构建 #10（Android Release run 46139684065）编译失败，唯一错误：`HkJsRuntime.java:113: error: ')' or ',' expected`。
+- 根因：第 2 步第 5 件（showSelectOptions 弹窗 + `__hkStoreGet`/`__hkStoreSet`）往 `CORE_APIS` 末尾加新行时漏了一个 `)`——第 101 行 `new HashSet<>(Arrays.asList(` 开了两个括号，第 113 行结尾 `"showSelectOptions", "__hkStoreGet", "__hkStoreSet");` 只有一个 `)`，只关了 asList，没关 HashSet。
+- 修复：第 113 行末尾补一个 `)`，改成 `"showSelectOptions", "__hkStoreGet", "__hkStoreSet"));`。重读 101–113 行核实括号配平（2 开 2 合）；顺手扫过同一文件——全文件只有这一处 `Arrays.asList(`，无同款漏括号处。`git diff --check` 通过。无本地 Android SDK，编译由后续 CI（重跑 #10）验证。
