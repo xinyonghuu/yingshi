@@ -286,6 +286,15 @@ public class App extends Application implements Application.ActivityLifecycleCal
     @Override
     public void onTrimMemory(int level) {
         if (!com.github.moyingshi.osc.tv.playback.origin.OriginSessionBootstrap.isWorker() && !lightweightProcess) PlaybackMemoryMonitor.process().onTrimMemory(level);
+        // 海阔第 3 步第 5 件：切后台时销毁 HkWebkitFetcher 在册的抓取 WebView
+        // （参照的 BackgroundSilence 分发点我方无，以 TRIM_MEMORY_UI_HIDDEN
+        // ——全部界面隐藏——承接；须主线程，onTrimMemory 即主线程）。
+        if (level >= TRIM_MEMORY_UI_HIDDEN) {
+            try {
+                com.github.moyingshi.osc.tv.api.hk.HkWebkitFetcher.destroyLiveOnBackground();
+            } catch (Throwable ignored) {
+            }
+        }
         super.onTrimMemory(level);
     }
 
