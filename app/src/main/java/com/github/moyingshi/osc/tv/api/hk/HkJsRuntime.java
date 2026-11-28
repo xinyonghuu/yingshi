@@ -110,7 +110,7 @@ public class HkJsRuntime {
             "refresh", "refreshPage",
             "fileExist", "md5", "joinUrl", "buildUrl",
             "sleep", "getPageTitle", "setTitle", "getUrl",
-            "showSelectOptions", "__hkStoreGet", "__hkStoreSet");
+            "showSelectOptions", "__hkStoreGet", "__hkStoreSet"));
 
     /**
      * $ fallback 垫片 + method_* 适配对象（x12 bootstrap 的等价实现）。
