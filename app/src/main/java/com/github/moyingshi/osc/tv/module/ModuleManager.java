@@ -37,7 +37,7 @@ import okhttp3.Response;
  */
 public final class ModuleManager {
 
-    private static final String REPO = "xinyonghuu/moyingshi";
+    private static final String REPO = "xinyonghuu/yingshi";
     private static final String RELEASES_API =
             "https://api.github.com/repos/" + REPO + "/releases?per_page=1";
     private static final String MODULES_DIR = "modules";
